@@ -1,0 +1,78 @@
+services:
+  db:
+    image: postgres:16
+    container_name: finsight-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - private_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cache:
+    image: redis:7
+    container_name: finsight-cache
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - private_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: python:3.11-slim
+    container_name: finsight-api
+    restart: unless-stopped
+    command: tail -f /dev/null
+    env_file:
+      - .env
+    networks:
+      - public_net   # esposizione verso l'API Gateway
+      - private_net  # accesso a db/cache/worker
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+
+  worker:
+    image: python:3.11-slim
+    container_name: finsight-worker
+    restart: unless-stopped
+    command: tail -f /dev/null
+    env_file:
+      - .env
+    networks:
+      - private_net
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+
+networks:
+  public_net:
+    name: finsight-public-net
+    driver: bridge
+  private_net:
+    name: finsight-private-net
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: finsight-postgres-data
+  redis_data:
+    name: finsight-redis-data
