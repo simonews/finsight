@@ -5,3 +5,5 @@ asyncpg
 alembic
 pydantic>=2
 pydantic-settings
+celery
+redis

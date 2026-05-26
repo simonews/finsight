@@ -51,12 +51,15 @@ services:
         condition: service_healthy
 
   worker:
-    image: python:3.11-slim
+    build: ./backend
     container_name: finsight-worker
     restart: unless-stopped
-    command: tail -f /dev/null
+    command: celery -A app.core.celery_app worker --loglevel=info
     env_file:
       - .env
+    working_dir: /app
+    volumes:
+      - ./backend:/app
     networks:
       - private_net
     depends_on:
