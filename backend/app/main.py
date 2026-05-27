@@ -1,8 +1,12 @@
-from fastapi import FastAPI, Request
+import uuid
+from fastapi import FastAPI, Request, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import get_session
+from app.models import User
 from app.api.v1.api import api_router
 from app.db.session import AsyncSessionLocal
 

@@ -1,6 +1,6 @@
 import asyncio
 import os
-from app.db.database import Base
+from app.db.base import Base
 import app.models  # noqa: F401
 from app.db.session import engine
 from app.db.url import get_async_database_url

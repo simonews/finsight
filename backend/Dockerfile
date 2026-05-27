@@ -7,7 +7,7 @@ WORKDIR /app
 
 #requirements prima del codice: sfrutto la cache dei layer Docker
 COPY requirements.txt .
-RUN py -m pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

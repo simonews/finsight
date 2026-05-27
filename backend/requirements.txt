@@ -7,3 +7,10 @@ pydantic>=2
 pydantic-settings
 celery
 redis
+yfinance
+openai
+pandas
+PyJWT
+passlib[bcrypt]
+bcrypt==4.0.1
+python-multipart
