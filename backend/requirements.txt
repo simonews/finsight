@@ -17,3 +17,6 @@ python-multipart
 fastapi-limiter==0.1.6
 prometheus-fastapi-instrumentator
 python-json-logger==2.0.7
+pytest
+pytest-asyncio
+httpx
