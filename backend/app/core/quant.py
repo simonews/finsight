@@ -1,9 +1,15 @@
+import io
 import math
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from celery.utils.log import get_task_logger
+
+from app.core.cache import CACHE_TTL_SECONDS, get_redis_sync
+
+logger = get_task_logger(__name__)
 
 
 def _extract_prices(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
@@ -18,6 +24,28 @@ def _extract_prices(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     return prices.dropna(how="all")
 
 
+def _get_prices(tickers: list[str]) -> pd.DataFrame:
+    cache_key = "yf_cache:prices:" + ",".join(sorted(tickers))
+    client = get_redis_sync()
+    try:
+        cached = client.get(cache_key)
+        if cached is not None:
+            logger.info("yfinance PRICES cache HIT for %s", tickers)
+            return pd.read_json(io.StringIO(cached), orient="split")
+    except Exception:
+        pass
+    logger.info("yfinance PRICES cache MISS for %s - downloading", tickers)
+    raw = yf.download(tickers, period="1y", progress=False)
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    prices = _extract_prices(raw, tickers)
+    try:
+        client.set(cache_key, prices.to_json(orient="split"), ex=CACHE_TTL_SECONDS)
+    except Exception:
+        pass
+    return prices
+
+
 def calculate_portfolio_metrics(positions: list[dict[str, Any]]) -> dict[str, Any]:
     if not positions:
         return {"error": "No positions provided"}
@@ -26,14 +54,10 @@ def calculate_portfolio_metrics(positions: list[dict[str, Any]]) -> dict[str, An
     quantities = {str(p["ticker"]).upper(): float(p["quantity"]) for p in positions}
 
     try:
-        raw = yf.download(tickers, period="1y", progress=False)
+        prices = _get_prices(tickers).dropna()
     except Exception as exc:
         return {"error": f"Market data download failed: {exc}"}
 
-    if raw is None or raw.empty:
-        return {"error": "No market data available for the requested tickers"}
-
-    prices = _extract_prices(raw, tickers).dropna()
     if prices.empty or len(prices) < 2:
         return {"error": "Insufficient historical data to compute metrics"}
 

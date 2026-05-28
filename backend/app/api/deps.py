@@ -2,7 +2,7 @@ import uuid
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,3 +57,23 @@ async def get_owned_portfolio(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions"
         )
     return portfolio
+
+
+async def rate_limit_identifier(request: Request) -> str:
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.scope["path"])
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth.split(" ", 1)[1]
+        try:
+            payload = jwt.decode(
+                token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+            )
+            subject = payload.get("sub")
+            if subject:
+                return f"user:{subject}:{path}"
+        except InvalidTokenError:
+            pass
+    client = request.client
+    host = client.host if client else "unknown"
+    return f"ip:{host}:{path}"

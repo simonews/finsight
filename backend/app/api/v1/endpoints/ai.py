@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
+from fastapi_limiter.depends import RateLimiter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_owned_portfolio
@@ -15,7 +16,11 @@ from app.tasks.ai_tasks import analyze_portfolio_task
 router = APIRouter()
 
 
-@router.post("/report/{portfolio_id}", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/report/{portfolio_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=3, seconds=60))],
+)
 async def request_portfolio_report(
     portfolio: Annotated[Portfolio, Depends(get_owned_portfolio)],
 ) -> dict[str, str]:

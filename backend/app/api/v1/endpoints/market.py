@@ -2,6 +2,7 @@ from typing import Annotated, Any
 
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, status
+from fastapi_limiter.depends import RateLimiter
 
 from app.api.deps import get_current_user
 from app.core.celery_app import celery_app
@@ -11,7 +12,11 @@ from app.tasks.market import fetch_market_data_task
 router = APIRouter()
 
 
-@router.post("/fetch/{ticker}", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/fetch/{ticker}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=5, seconds=60))],
+)
 async def fetch_market_data(
     ticker: str,
     current_user: Annotated[User, Depends(get_current_user)],
