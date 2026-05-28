@@ -1,8 +1,11 @@
 import json
 import os
+import logging
 from typing import Any
 
 from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "Sei uno spietato e cinico analista quantitativo di un hedge fund. "
@@ -31,18 +34,30 @@ class GenerativeAIAnalyzer:
             f"DATI PORTAFOGLIO:\n{json.dumps(portfolio_data, ensure_ascii=False)}\n\n"
             f"DATI MERCATO:\n{json.dumps(market_data, ensure_ascii=False)}"
         )
-        
-        async with AsyncOpenAI(
-            api_key=self._api_key,
-            base_url="https://api.groq.com/openai/v1",
-            timeout=30.0
-        ) as client:
-            response = await client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.3,
-            )
+
+        logger.info(
+            "Generating portfolio report",
+            extra={"portfolio_id": portfolio_data.get("id")},
+        )
+        try:
+            async with AsyncOpenAI(
+                api_key=self._api_key,
+                base_url="https://api.groq.com/openai/v1",
+                timeout=30.0,
+            ) as client:
+                response = await client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                )
+        except Exception:
+            logger.exception("LLM report generation failed")
+            raise
+        logger.info(
+            "Portfolio report generated",
+            extra={"portfolio_id": portfolio_data.get("id")},
+        )
         return response.choices[0].message.content or ""
