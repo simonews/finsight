@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -9,6 +10,15 @@ import streamlit as st
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000/api/v1")
 REQUEST_TIMEOUT = 15
+LOCAL_TZ = ZoneInfo("Europe/Rome")
+
+def _format_timestamp(iso_string):
+    try:
+        dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
+        return dt.astimezone(LOCAL_TZ).strftime("%d/%m/%Y %H:%M")
+    except (ValueError, AttributeError):
+        return iso_string
+
 
 
 def api_call(method, path, *, token=None, json=None, data=None):
@@ -66,9 +76,7 @@ def render_auth():
                     submitted = st.form_submit_button("Login", use_container_width=True)
                 if submitted:
                     response, error = api_call(
-                        "POST",
-                        "/auth/login",
-                        data={"username": email, "password": password},
+                        "POST", "/auth/login", data={"username": email, "password": password}
                     )
                     if error:
                         st.error(f"Servizio non raggiungibile: {error}")
@@ -84,17 +92,11 @@ def render_auth():
             with register_tab:
                 with st.form("register_form"):
                     email = st.text_input("Email", key="reg_email")
-                    password = st.text_input(
-                        "Password", type="password", key="reg_password"
-                    )
-                    submitted = st.form_submit_button(
-                        "Register", use_container_width=True
-                    )
+                    password = st.text_input("Password", type="password", key="reg_password")
+                    submitted = st.form_submit_button("Register", use_container_width=True)
                 if submitted:
                     response, error = api_call(
-                        "POST",
-                        "/auth/register",
-                        json={"email": email, "password": password},
+                        "POST", "/auth/register", json={"email": email, "password": password}
                     )
                     if error:
                         st.error(f"Servizio non raggiungibile: {error}")
@@ -117,9 +119,7 @@ def create_portfolio_form():
                 st.warning("Il nome e' obbligatorio.")
             else:
                 response = authed_call(
-                    "POST",
-                    "/portfolios/",
-                    json={"name": name, "description": description or None},
+                    "POST", "/portfolios/", json={"name": name, "description": description or None}
                 )
                 if response is not None and response.status_code == 201:
                     st.toast("Portafoglio creato", icon="✅")
@@ -140,39 +140,228 @@ def render_sidebar():
             st.rerun()
 
 
+def get_positions(portfolio_id):
+    response = authed_call("GET", f"/positions/portfolio/{portfolio_id}")
+    if response is None:
+        return []
+    if response.status_code != 200:
+        st.error(f"Errore caricamento posizioni ({response.status_code}).")
+        return []
+    return response.json()
+
+
+def fetch_analytics(portfolio_id):
+    response = authed_call("GET", f"/market/prices/{portfolio_id}")
+    if response is not None and response.status_code == 200:
+        return response.json()
+    if response is not None:
+        st.warning("Dati di mercato non disponibili al momento.")
+    return None
+
+
+def render_summary(positions, analytics):
+    df = pd.DataFrame(positions) if positions else pd.DataFrame()
+    cost_total = 0.0
+    if not df.empty:
+        df["cost_basis"] = df["quantity"].astype(float) * df["average_price"].astype(float)
+        cost_total = float(df["cost_basis"].sum())
+
+    c = st.columns(4)
+    c[0].metric("Posizioni", len(positions),
+                help="Numero di posizioni presenti nel portafoglio.")
+    c[1].metric("Ticker", int(df["ticker"].nunique()) if not df.empty else 0,
+                help="Numero di titoli distinti detenuti.")
+    c[2].metric("Costo totale", f"{cost_total:,.2f}",
+                help="Capitale investito: somma di quantita' x prezzo medio di carico.")
+    if analytics:
+        totals = analytics["totals"]
+        c[3].metric("Valore attuale", f"{totals['current_value']:,.2f}",
+                    delta=f"{totals['pnl']:,.2f}",
+                    help="Valore di mercato corrente; la variazione e' il guadagno/perdita complessivo.")
+    else:
+        c[3].metric("Valore attuale", "—",
+                    help="Disponibile dopo il calcolo dei prezzi di mercato.")
+
+
+def render_positions_table(positions):
+    if not positions:
+        st.info("Nessuna posizione. Aggiungine una dalla barra in alto.")
+        return
+    df = pd.DataFrame(positions)
+    df["quantity"] = df["quantity"].astype(float)
+    df["average_price"] = df["average_price"].astype(float)
+    df["cost_basis"] = df["quantity"] * df["average_price"]
+    st.dataframe(
+        df[["ticker", "quantity", "average_price", "cost_basis", "sector", "market"]],
+        use_container_width=True, hide_index=True,
+        column_config={
+            "ticker": st.column_config.Column("Ticker", help="Simbolo di borsa del titolo."),
+            "quantity": st.column_config.Column("Quantita'", help="Numero di azioni/quote possedute."),
+            "average_price": st.column_config.Column("Prezzo medio", help="Prezzo medio di carico: quanto hai pagato per unita'."),
+            "cost_basis": st.column_config.Column("Costo", help="Costo totale della posizione: quantita' x prezzo medio."),
+            "sector": st.column_config.Column("Settore", help="Settore economico del titolo (se inserito)."),
+            "market": st.column_config.Column("Mercato", help="Mercato/borsa di quotazione (se inserito)."),
+        },
+    )
+
+
+def render_pnl_table(analytics):
+    if not analytics or not analytics["positions"]:
+        return
+    pnl_df = pd.DataFrame(analytics["positions"])
+    st.dataframe(
+        pnl_df[["ticker", "current_price", "current_value", "cost_basis", "pnl", "pnl_pct"]],
+        use_container_width=True, hide_index=True,
+        column_config={
+            "ticker": st.column_config.Column("Ticker", help="Simbolo di borsa del titolo."),
+            "current_price": st.column_config.Column("Prezzo attuale", help="Ultimo prezzo di mercato del titolo."),
+            "current_value": st.column_config.Column("Valore attuale", help="Valore di mercato corrente: quantita' x prezzo attuale."),
+            "cost_basis": st.column_config.Column("Costo", help="Capitale investito: quantita' x prezzo medio di carico."),
+            "pnl": st.column_config.Column("P/L", help="Guadagno o perdita: valore attuale meno costo."),
+            "pnl_pct": st.column_config.Column("P/L %", help="Variazione percentuale rispetto al costo investito."),
+        },
+    )
+
+
+def render_charts(positions, analytics):
+    pie_df = pd.DataFrame(positions)
+    pie_df["cost_basis"] = (
+        pie_df["quantity"].astype(float) * pie_df["average_price"].astype(float)
+    )
+
+    left, right = st.columns([1, 2])
+    with left:
+        fig_pie = px.pie(pie_df, names="ticker", values="cost_basis", title="Allocazione per costo")
+        fig_pie.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0))
+        st.plotly_chart(fig_pie, use_container_width=True)
+    with right:
+        if analytics and analytics["history"]["dates"]:
+            hist = analytics["history"]
+            hist_df = pd.DataFrame(hist["series"], index=pd.to_datetime(hist["dates"]))
+            fig_line = px.line(hist_df, title="Andamento prezzi (ultimi 12 mesi)")
+            fig_line.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0), legend_title_text="")
+            st.plotly_chart(fig_line, use_container_width=True)
+        else:
+            st.info("Andamento prezzi non disponibile al momento.")
+
+    metrics = analytics.get("metrics") if analytics else None
+    if metrics and metrics["per_ticker"]:
+        st.markdown("**Metriche quantitative**")
+        m1, m2 = st.columns(2)
+        m1.metric("Volatilita' annualizzata", f"{metrics['annualized_volatility'] * 100:.2f}%",
+                  help="Oscillazione annualizzata dei rendimenti pesati: piu' alta = piu' rischio.")
+        m2.metric("Rendimento 1Y (portafoglio)", f"{metrics['portfolio_return_1y'] * 100:.2f}%",
+                  help="Rendimento a 12 mesi, media dei rendimenti pesata per i pesi di mercato.")
+        tech_df = pd.DataFrame(metrics["per_ticker"])
+        st.dataframe(
+            tech_df, use_container_width=True, hide_index=True,
+            column_config={
+                "ticker": st.column_config.Column("Ticker", help="Simbolo di borsa del titolo."),
+                "weight_pct": st.column_config.Column("Peso (mercato) %", help="Quota del titolo sul valore di mercato totale del portafoglio."),
+                "return_1y_pct": st.column_config.Column("Rendimento 1Y %", help="Variazione percentuale del prezzo del titolo negli ultimi 12 mesi."),
+            },
+        )
+
+
 def add_position_form(portfolio_id):
-    with st.expander("Aggiungi posizione"):
-        with st.form("add_position_form"):
-            ticker = st.text_input("Ticker")
-            col1, col2 = st.columns(2)
-            quantity = col1.number_input("Quantita'", min_value=0.0, step=1.0)
-            average_price = col2.number_input("Prezzo medio", min_value=0.0, step=1.0)
-            purchase_date = st.date_input("Data acquisto")
-            col3, col4 = st.columns(2)
-            sector = col3.text_input("Settore (opzionale)")
-            market = col4.text_input("Mercato (opzionale)")
-            submitted = st.form_submit_button("Aggiungi", use_container_width=True)
-        if submitted:
-            if not ticker.strip() or quantity <= 0 or average_price <= 0:
-                st.warning("Ticker, quantita' e prezzo medio sono obbligatori.")
-            else:
-                payload = {
-                    "ticker": ticker.upper(),
-                    "quantity": quantity,
-                    "average_price": average_price,
-                    "purchase_date": datetime.combine(
-                        purchase_date, datetime.min.time()
-                    ).isoformat(),
-                    "sector": sector or None,
-                    "market": market or None,
-                    "portfolio_id": portfolio_id,
-                }
-                response = authed_call("POST", "/positions/", json=payload)
-                if response is not None and response.status_code == 201:
-                    st.toast("Posizione aggiunta", icon="✅")
-                    st.rerun()
-                elif response is not None:
-                    st.error(f"Errore ({response.status_code}).")
+    with st.form("add_position_form"):
+        ticker = st.text_input("Ticker")
+        col1, col2 = st.columns(2)
+        quantity = col1.number_input("Quantita'", min_value=0.0, step=1.0)
+        average_price = col2.number_input("Prezzo medio", min_value=0.0, step=1.0)
+        purchase_date = st.date_input("Data acquisto")
+        col3, col4 = st.columns(2)
+        sector = col3.text_input("Settore (opzionale)")
+        market = col4.text_input("Mercato (opzionale)")
+        submitted = st.form_submit_button("Aggiungi", use_container_width=True)
+    if submitted:
+        if not ticker.strip() or quantity <= 0 or average_price <= 0:
+            st.warning("Ticker, quantita' e prezzo medio sono obbligatori.")
+        else:
+            payload = {
+                "ticker": ticker.upper(),
+                "quantity": quantity,
+                "average_price": average_price,
+                "purchase_date": datetime.combine(purchase_date, datetime.min.time()).isoformat(),
+                "sector": sector or None,
+                "market": market or None,
+                "portfolio_id": portfolio_id,
+            }
+            response = authed_call("POST", "/positions/", json=payload)
+            if response is not None and response.status_code == 201:
+                st.toast("Posizione aggiunta", icon="✅")
+                st.rerun()
+            elif response is not None:
+                st.error(f"Errore ({response.status_code}).")
+
+
+def update_position_form(portfolio_id, positions):
+    labels = {f"{p['ticker']} - {p['id'][:8]}": p for p in positions}
+    choice = st.selectbox("Posizione da modificare", list(labels.keys()), key="update_select")
+    pos = labels[choice]
+
+    try:
+        current_date = datetime.fromisoformat(pos["purchase_date"].replace("Z", "+00:00")).date()
+    except (ValueError, AttributeError, KeyError):
+        current_date = datetime.today().date()
+
+    with st.form("update_position_form"):
+        st.text_input("Ticker (non modificabile)", value=pos["ticker"], disabled=True)
+        col1, col2 = st.columns(2)
+        quantity = col1.number_input("Quantita'", min_value=0.0, step=1.0, value=float(pos["quantity"]))
+        average_price = col2.number_input("Prezzo medio", min_value=0.0, step=1.0, value=float(pos["average_price"]))
+        purchase_date = st.date_input("Data acquisto", value=current_date)
+        col3, col4 = st.columns(2)
+        sector = col3.text_input("Settore", value=pos.get("sector") or "")
+        market = col4.text_input("Mercato", value=pos.get("market") or "")
+        submitted = st.form_submit_button("Salva modifiche", use_container_width=True)
+    if submitted:
+        if quantity <= 0 or average_price <= 0:
+            st.warning("Quantita' e prezzo medio devono essere maggiori di zero.")
+        else:
+            payload = {
+                "quantity": quantity,
+                "average_price": average_price,
+                "purchase_date": datetime.combine(purchase_date, datetime.min.time()).isoformat(),
+                "sector": sector or None,
+                "market": market or None,
+            }
+            response = authed_call("PATCH", f"/positions/{pos['id']}", json=payload)
+            if response is not None and response.status_code == 200:
+                st.toast("Posizione aggiornata", icon="✏️")
+                st.rerun()
+            elif response is not None:
+                st.error(f"Errore ({response.status_code}).")
+
+
+def remove_position_control(positions):
+    labels = {
+        f"{p['ticker']} - qta {float(p['quantity']):g} - {p['id'][:8]}": p["id"]
+        for p in positions
+    }
+    choice = st.selectbox("Posizione da rimuovere", list(labels.keys()), key="remove_position")
+    if st.button("Rimuovi", use_container_width=True):
+        response = authed_call("DELETE", f"/positions/{labels[choice]}")
+        if response is not None and response.status_code == 204:
+            st.toast("Posizione rimossa", icon="🗑️")
+            st.rerun()
+        elif response is not None:
+            st.error(f"Errore ({response.status_code}).")
+
+
+def close_portfolio_control(portfolio):
+    st.caption(
+        f"Eliminerai definitivamente '{portfolio['name']}' con tutte le sue posizioni e report. Irreversibile."
+    )
+    confirm = st.checkbox("Confermo l'eliminazione", key="confirm_delete")
+    if st.button("Elimina definitivamente", disabled=not confirm, use_container_width=True):
+        response = authed_call("DELETE", f"/portfolios/{portfolio['id']}")
+        if response is not None and response.status_code == 204:
+            st.session_state.pop("selected_portfolio", None)
+            st.toast("Portafoglio eliminato", icon="🗑️")
+            st.rerun()
+        elif response is not None:
+            st.error(f"Errore ({response.status_code}).")
 
 
 def fetch_market_data(tickers):
@@ -196,9 +385,7 @@ def fetch_market_data(tickers):
         st.toast("Dati aggiornati con successo", icon="✅")
         return
     if rate_limited:
-        st.warning(
-            f"Limite superato (max 5/min) per: {', '.join(rate_limited)}. Riprova tra un minuto."
-        )
+        st.warning(f"Limite superato (max 5/min) per: {', '.join(rate_limited)}. Riprova tra un minuto.")
     if failed:
         st.warning("Aggiornamento non riuscito per alcune posizioni.")
     if accepted:
@@ -225,163 +412,21 @@ def generate_report(portfolio_id):
         st.warning("Il report sta impiegando piu' del previsto; ricarica tra poco.")
 
 
-def render_positions(portfolio_id):
-    response = authed_call("GET", f"/positions/portfolio/{portfolio_id}")
-    if response is None:
-        return []
-    if response.status_code != 200:
-        st.error(f"Errore caricamento posizioni ({response.status_code}).")
-        return []
-    positions = response.json()
-    if not positions:
-        st.info("Nessuna posizione in questo portafoglio.")
-        return []
-
-    df = pd.DataFrame(positions)
-    df["quantity"] = df["quantity"].astype(float)
-    df["average_price"] = df["average_price"].astype(float)
-    df["cost_basis"] = df["quantity"] * df["average_price"]
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Posizioni", len(df),
-              help="Numero di posizioni (righe) presenti nel portafoglio.")
-    m2.metric("Ticker", int(df["ticker"].nunique()),
-              help="Numero di titoli distinti detenuti.")
-    m3.metric("Costo totale", f"{df['cost_basis'].sum():,.2f}",
-              help="Capitale investito: somma di quantita' x prezzo medio di carico.")
-
-    st.dataframe(
-        df[["ticker", "quantity", "average_price", "cost_basis", "sector", "market"]],
-        use_container_width=True,
-        hide_index=True,
-    )
-    return positions
-
-def render_charts_and_pnl(portfolio_id, positions):
-    pie_df = pd.DataFrame(positions)
-    pie_df["cost_basis"] = (
-        pie_df["quantity"].astype(float) * pie_df["average_price"].astype(float)
-    )
-
-    response = authed_call("GET", f"/market/prices/{portfolio_id}")
-    analytics = None
-    if response is not None and response.status_code == 200:
-        analytics = response.json()
-    elif response is not None:
-        st.warning("Dati di mercato non disponibili al momento (P/L e andamento prezzi).")
-
-    if analytics:
-        totals = analytics["totals"]
-        c1, c2 = st.columns(2)
-        c1.metric(
-            "Valore attuale", f"{totals['current_value']:,.2f}",
-            help="Valore di mercato corrente: somma di quantita' x prezzo attuale di ogni titolo.",
-        )
-        c2.metric(
-            "Guadagno/Perdita", f"{totals['pnl']:,.2f}",
-            delta=f"{totals['pnl_pct']:.2f}%",
-            help="Differenza tra valore attuale e costo di carico. La percentuale e' la variazione rispetto al capitale investito.",
-        )
-
-    chart_left, chart_right = st.columns([1, 2])
-    with chart_left:
-        fig_pie = px.pie(
-            pie_df, names="ticker", values="cost_basis", title="Allocazione per costo"
-        )
-        fig_pie.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0))
-        st.plotly_chart(fig_pie, use_container_width=True)
-    with chart_right:
-        if analytics and analytics["history"]["dates"]:
-            hist = analytics["history"]
-            hist_df = pd.DataFrame(
-                hist["series"], index=pd.to_datetime(hist["dates"])
-            )
-            fig_line = px.line(hist_df, title="Andamento prezzi (ultimi 12 mesi)")
-            fig_line.update_layout(
-                height=320, margin=dict(t=40, b=0, l=0, r=0), legend_title_text=""
-            )
-            st.plotly_chart(fig_line, use_container_width=True)
-        else:
-            st.info("Andamento prezzi non disponibile al momento.")
-
-    if analytics and analytics["positions"]:
-        pnl_df = pd.DataFrame(analytics["positions"])
-        st.dataframe(
-            pnl_df[
-                ["ticker", "current_price", "current_value", "cost_basis", "pnl", "pnl_pct"]
-            ],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "current_price": "Prezzo attuale",
-                "current_value": "Valore attuale",
-                "cost_basis": "Costo",
-                "pnl": "P/L",
-                "pnl_pct": "P/L %",
-            },
-        )
-    metrics = analytics.get("metrics") if analytics else None
-    if metrics and metrics["per_ticker"]:
-        with st.expander("Dettagli tecnici (Quant)"):
-            t1, t2 = st.columns(2)
-            t1.metric(
-                "Volatilita' annualizzata",
-                f"{metrics['annualized_volatility'] * 100:.2f}%",
-                help="Deviazione standard annualizzata dei rendimenti giornalieri pesati del portafoglio: piu' alta = piu' oscillazioni/rischio.",
-            )
-            t2.metric(
-                "Rendimento 1Y (portafoglio)",
-                f"{metrics['portfolio_return_1y'] * 100:.2f}%",
-                help="Rendimento dell'ultimo anno, come media dei rendimenti dei titoli pesata per i pesi di mercato.",
-            )
-            tech_df = pd.DataFrame(metrics["per_ticker"])
-            st.dataframe(
-                tech_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "ticker": "Ticker",
-                    "weight_pct": "Peso (mercato) %",
-                    "return_1y_pct": "Rendimento 1Y %",
-                },
-            )
-
-
 def render_reports(portfolio_id):
-    with st.expander("Report storici"):
-        response = authed_call("GET", f"/ai/reports/{portfolio_id}")
-        if response is None:
-            return
-        if response.status_code != 200:
-            st.error(f"Errore caricamento report ({response.status_code}).")
-            return
-        reports = response.json()
-        if not reports:
-            st.info("Nessun report generato per questo portafoglio.")
-            return
-        for report in reports:
-            with st.container(border=True):
-                st.caption(f"Generato il {report['generated_at']}")
-                st.markdown(report["report_text"])
-
-def close_portfolio_control(portfolio):
-    with st.expander("⚠️ Chiudi portafoglio"):
-        st.caption(
-            f"Eliminerai definitivamente '{portfolio['name']}' con tutte le sue posizioni e report. Operazione irreversibile."
-        )
-        confirm = st.checkbox(
-            "Confermo di voler eliminare questo portafoglio", key="confirm_delete"
-        )
-        if st.button(
-            "Elimina definitivamente", disabled=not confirm, use_container_width=True
-        ):
-            response = authed_call("DELETE", f"/portfolios/{portfolio['id']}")
-            if response is not None and response.status_code == 204:
-                st.session_state.pop("selected_portfolio", None)
-                st.toast("Portafoglio eliminato", icon="🗑️")
-                st.rerun()
-            elif response is not None:
-                st.error(f"Errore ({response.status_code}).")
+    response = authed_call("GET", f"/ai/reports/{portfolio_id}")
+    if response is None:
+        return
+    if response.status_code != 200:
+        st.error(f"Errore caricamento report ({response.status_code}).")
+        return
+    reports = response.json()
+    if not reports:
+        st.info("Nessun report generato per questo portafoglio.")
+        return
+    for report in reports:
+        with st.container(border=True):
+            st.caption(f"Generato il {_format_timestamp(report['generated_at'])}")
+            st.markdown(report["report_text"])
 
 
 def render_portfolio_detail(portfolio):
@@ -389,24 +434,43 @@ def render_portfolio_detail(portfolio):
     if portfolio.get("description"):
         st.caption(portfolio["description"])
 
-    positions = render_positions(portfolio["id"])
-    if positions:
-        render_charts_and_pnl(portfolio["id"], positions)
+    positions = get_positions(portfolio["id"])
+    analytics = fetch_analytics(portfolio["id"]) if positions else None
 
-    add_position_form(portfolio["id"])
-    if positions:
-        remove_position_control(positions)
+    render_summary(positions, analytics)
 
-    b1, b2 = st.columns(2)
-    if b1.button(
-        "⬇️ Scarica Dati Mercato", use_container_width=True, disabled=not positions
-    ):
+    bar = st.columns(4)
+    with bar[0].popover("➕ Aggiungi", use_container_width=True):
+        add_position_form(portfolio["id"])
+    with bar[1].popover("✏️ Modifica", use_container_width=True, disabled=not positions):
+        if positions:
+            update_position_form(portfolio["id"], positions)
+    with bar[2].popover("🗑️ Rimuovi", use_container_width=True, disabled=not positions):
+        if positions:
+            remove_position_control(positions)
+    with bar[3].popover("⚠️ Chiudi", use_container_width=True):
+        close_portfolio_control(portfolio)
+
+    a1, a2 = st.columns(2)
+    if a1.button("⬇️ Scarica Dati Mercato", use_container_width=True, disabled=not positions):
         fetch_market_data([p["ticker"] for p in positions])
-    if b2.button("🤖 Genera Report AI", use_container_width=True):
+    if a2.button("🤖 Genera Report AI", use_container_width=True):
         generate_report(portfolio["id"])
 
-    render_reports(portfolio["id"])
-    close_portfolio_control(portfolio)
+    tab_charts, tab_pos, tab_reports = st.tabs(
+        ["Grafici & metriche", "Posizioni & P/L", "Report AI"]
+    )
+    with tab_charts:
+        if positions:
+            render_charts(positions, analytics)
+        else:
+            st.info("Aggiungi una posizione per vedere i grafici.")
+    with tab_pos:
+        render_positions_table(positions)
+        if analytics:
+            render_pnl_table(analytics)
+    with tab_reports:
+        render_reports(portfolio["id"])
 
 
 def render_dashboard():
@@ -429,24 +493,6 @@ def render_dashboard():
     )
     st.divider()
     render_portfolio_detail(options[choice])
-
-
-def remove_position_control(positions):
-    with st.expander("Rimuovi posizione"):
-        labels = {
-            f"{p['ticker']} · qta {float(p['quantity']):g} · {p['id'][:8]}": p["id"]
-            for p in positions
-        }
-        choice = st.selectbox(
-            "Posizione da rimuovere", list(labels.keys()), key="remove_position"
-        )
-        if st.button("Rimuovi", use_container_width=True):
-            response = authed_call("DELETE", f"/positions/{labels[choice]}")
-            if response is not None and response.status_code == 204:
-                st.toast("Posizione rimossa", icon="🗑️")
-                st.rerun()
-            elif response is not None:
-                st.error(f"Errore ({response.status_code}).")
 
 
 def main():

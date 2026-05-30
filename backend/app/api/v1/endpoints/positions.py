@@ -12,7 +12,7 @@ from app.db.session import get_session
 from app.models.portfolio import Portfolio
 from app.models.position import Position
 from app.models.user import User
-from app.schemas.schema_position import PositionCreate, PositionRead
+from app.schemas.schema_position import PositionCreate, PositionRead, PositionUpdate
 
 router = APIRouter()
 
@@ -41,6 +41,26 @@ async def read_positions_by_portfolio(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Sequence[Position]:
     return await crud_position.get_by_portfolio(db, portfolio_id=portfolio.id)
+
+
+@router.patch("/{position_id}", response_model=PositionRead)
+async def update_position(
+    position_id: uuid.UUID,
+    obj_in: PositionUpdate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> Position:
+    position = await crud_position.get(db, position_id)
+    if position is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Position not found"
+        )
+    owner_portfolio = await crud_portfolio.get(db, position.portfolio_id)
+    if owner_portfolio is None or owner_portfolio.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions"
+        )
+    return await crud_position.update(db, db_obj=position, obj_in=obj_in)
 
 
 @router.delete("/{position_id}", status_code=status.HTTP_204_NO_CONTENT)
