@@ -8,21 +8,31 @@ from openai import AsyncOpenAI
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "Sei uno spietato e cinico analista quantitativo di un hedge fund. "
-    "Il tuo compito è destrutturare portafogli azionari con freddezza clinica. "
-    "REGOLE RIGIDE VITALI: "
-    "1. NON ripetere MAI lo stesso concetto. "
-    "2. VIETATO usare frasi di circostanza, preamboli, introduzioni o conclusioni ovvie (es. 'La presente analisi...', 'In conclusione...'). "
-    "3. Usa un tono distaccato, telegrafico e iper-tecnico. "
-    "4. Formatta l'output rigorosamente in Markdown con queste tre sezioni esatte: "
-    "## 1. Fotografia Asset\n"
-    "## 2. Rischio e Sovraesposizione\n"
-    "## 3. Inefficienze Strutturali."
+    "You are an expert Wall Street quantitative analyst writing a private briefing "
+    "for a client. You receive raw portfolio data and quantitative metrics "
+    "(per-asset weights, 1-year return per asset, portfolio 1-year return, annualized volatility).\n"
+    "Write the report in Italian, in a professional advisory tone, as flowing prose.\n"
+    "STRICT RULES:\n"
+    "- Do NOT use tables, bullet points, lists or headings. Narrative paragraphs only.\n"
+    "- Base every statement EXCLUSIVELY on the figures provided. NEVER invent, guess or approximate. "
+    "Do NOT mention alpha, beta, Sharpe or any metric absent from the input.\n"
+    "- Always produce EXACTLY three paragraphs, in this fixed order, every time:\n"
+    "  Paragraph 1 (Composizione): describe the portfolio composition citing the exact weight of each holding.\n"
+    "  Paragraph 2 (Rischio e performance): comment on the annualized volatility, the portfolio 1-year return "
+    "and the 1-year return of each individual asset, citing the exact values provided.\n"
+    "  Paragraph 3 (Concentrazione e indicazione strategica): assess concentration vs diversification implied by the weights "
+    "and give one forward-looking strategic consideration.\n"
+    "- Be concise and consistent across runs. No preamble. Do NOT add a disclaimer yourself: one is appended automatically."
+)
+
+DISCLAIMER = (
+    "\n\n_Questo report e' generato automaticamente a scopo puramente informativo e non "
+    "costituisce consulenza finanziaria ne' una raccomandazione di investimento._"
 )
 
 
 class GenerativeAIAnalyzer:
-    def __init__(self, model: str = "llama-3.1-8b-instant") -> None:
+    def __init__(self, model: str = "llama-3.3-70b-versatile") -> None:
         self._api_key = os.environ["GROQ_API_KEY"]
         self._model = model
 
@@ -30,9 +40,10 @@ class GenerativeAIAnalyzer:
         self, portfolio_data: dict[str, Any], market_data: dict[str, Any]
     ) -> str:
         user_prompt = (
-            f"Analizza i seguenti dati grezzi. Zero chiacchiere, dammi i fatti.\n"
+            "Redigi il report narrativo per il seguente portafoglio, "
+            "interpretando i dati invece di elencarli.\n\n"
             f"DATI PORTAFOGLIO:\n{json.dumps(portfolio_data, ensure_ascii=False)}\n\n"
-            f"DATI MERCATO:\n{json.dumps(market_data, ensure_ascii=False)}"
+            f"METRICHE QUANTITATIVE:\n{json.dumps(market_data, ensure_ascii=False)}"
         )
 
         logger.info(
@@ -60,4 +71,5 @@ class GenerativeAIAnalyzer:
             "Portfolio report generated",
             extra={"portfolio_id": portfolio_data.get("id")},
         )
-        return response.choices[0].message.content or ""
+        report = response.choices[0].message.content or ""
+        return report + DISCLAIMER

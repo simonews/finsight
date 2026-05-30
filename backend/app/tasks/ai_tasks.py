@@ -44,10 +44,15 @@ async def _run_analysis(portfolio_id: uuid.UUID) -> dict[str, str]:
                     for p in positions_orm
                 ],
             }
+            aggregated: dict[str, float] = {}
+            for p in positions_orm:
+                key = p.ticker.upper()
+                aggregated[key] = aggregated.get(key, 0.0) + float(p.quantity)
             quant_input: list[dict[str, Any]] = [
-                {"ticker": p.ticker, "quantity": float(p.quantity)}
-                for p in positions_orm
+                {"ticker": ticker, "quantity": quantity}
+                for ticker, quantity in aggregated.items()
             ]
+             
     finally:
         await read_engine.dispose()
 

@@ -7,6 +7,7 @@ import pandas as pd
 import yfinance as yf
 from celery.utils.log import get_task_logger
 
+
 from app.core.cache import CACHE_TTL_SECONDS, get_redis_sync
 
 logger = get_task_logger(__name__)
@@ -96,3 +97,147 @@ def calculate_portfolio_metrics(positions: list[dict[str, Any]]) -> dict[str, An
     if missing:
         result["missing_tickers"] = missing
     return result
+
+def _download_close_prices(tickers: list[str], period: str) -> pd.DataFrame:
+    raw = yf.download(tickers, period=period, progress=False, auto_adjust=True)
+    if raw.empty:
+        return pd.DataFrame()
+    if isinstance(raw.columns, pd.MultiIndex):
+        closes = raw["Close"].copy()
+    else:
+        closes = raw[["Close"]].copy()
+        closes.columns = [tickers[0]]
+    return closes.dropna(how="all")
+
+
+def _get_cached_closes(tickers: list[str], period: str) -> pd.DataFrame:
+    cache_key = f"yf_cache:hist:{','.join(tickers)}:{period}"
+    client = None
+    try:
+        client = get_redis_sync()
+        cached = client.get(cache_key)
+        if cached:
+            payload = cached.decode() if isinstance(cached, bytes) else cached
+            return pd.read_json(io.StringIO(payload), orient="split")
+    except Exception:
+        client = None
+    closes = _download_close_prices(tickers, period)
+    if not closes.empty and client is not None:
+        try:
+            client.set(cache_key, closes.to_json(orient="split"), ex=CACHE_TTL_SECONDS)
+        except Exception:
+            pass
+    return closes
+
+
+def build_portfolio_analytics(positions: list[dict], period: str = "1y") -> dict:
+    empty = {
+        "positions": [],
+        "totals": {"cost_basis": 0.0, "current_value": 0.0, "pnl": 0.0, "pnl_pct": 0.0},
+        "history": {"dates": [], "series": {}},
+    }
+    if not positions:
+        return empty
+
+    tickers = sorted({str(p["ticker"]).upper() for p in positions})
+    closes = _get_cached_closes(tickers, period)
+    if not closes.empty:
+        closes.index = pd.to_datetime(closes.index)
+    latest = closes.iloc[-1] if not closes.empty else None
+
+    positions_out = []
+    total_cost = 0.0
+    total_value = 0.0
+    for p in positions:
+        ticker = str(p["ticker"]).upper()
+        qty = float(p["quantity"])
+        avg = float(p["average_price"])
+        cost = qty * avg
+        total_cost += cost
+
+        current_price = None
+        if latest is not None and ticker in closes.columns and pd.notna(latest[ticker]):
+            current_price = float(latest[ticker])
+
+        if current_price is not None:
+            value = qty * current_price
+            total_value += value
+            pnl = value - cost
+            pnl_pct = (pnl / cost * 100.0) if cost else 0.0
+        else:
+            value = pnl = pnl_pct = None
+
+        positions_out.append({
+            "ticker": ticker,
+            "quantity": qty,
+            "average_price": round(avg, 4),
+            "cost_basis": round(cost, 2),
+            "current_price": round(current_price, 4) if current_price is not None else None,
+            "current_value": round(value, 2) if value is not None else None,
+            "pnl": round(pnl, 2) if pnl is not None else None,
+            "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+        })
+
+    totals = {
+        "cost_basis": round(total_cost, 2),
+        "current_value": round(total_value, 2),
+        "pnl": round(total_value - total_cost, 2),
+        "pnl_pct": round((total_value - total_cost) / total_cost * 100.0, 2) if total_cost else 0.0,
+    }
+
+    history = {"dates": [], "series": {}}
+    if not closes.empty:
+        history["dates"] = [d.strftime("%Y-%m-%d") for d in closes.index]
+        history["series"] = {
+            str(t): [round(float(v), 4) if pd.notna(v) else None for v in closes[t]]
+            for t in closes.columns
+        }
+
+    metrics = {"annualized_volatility": 0.0, "portfolio_return_1y": 0.0, "per_ticker": []}
+    if not closes.empty and latest is not None:
+        qty_by_ticker: dict[str, float] = {}
+        for p in positions:
+            t = str(p["ticker"]).upper()
+            qty_by_ticker[t] = qty_by_ticker.get(t, 0.0) + float(p["quantity"])
+
+        market_value = {
+            t: qty_by_ticker[t] * float(latest[t])
+            for t in closes.columns
+            if t in qty_by_ticker and pd.notna(latest[t])
+        }
+        total_mv = sum(market_value.values())
+        weights = {t: (market_value[t] / total_mv if total_mv else 0.0) for t in market_value}
+
+        returns_1y = {}
+        for t in closes.columns:
+            series = closes[t].dropna()
+            if len(series) >= 2 and series.iloc[0] != 0:
+                returns_1y[t] = float(series.iloc[-1] / series.iloc[0] - 1.0)
+
+        portfolio_return = sum(weights.get(t, 0.0) * returns_1y.get(t, 0.0) for t in weights)
+
+        log_returns = np.log(closes / closes.shift(1))
+        weighted = None
+        for t in weights:
+            contrib = log_returns[t] * weights[t]
+            weighted = contrib if weighted is None else weighted + contrib
+        annualized_vol = 0.0
+        if weighted is not None:
+            clean = weighted.dropna()
+            if len(clean) > 1:
+                annualized_vol = float(clean.std() * (252 ** 0.5))
+
+        metrics = {
+            "annualized_volatility": round(annualized_vol, 4),
+            "portfolio_return_1y": round(portfolio_return, 4),
+            "per_ticker": [
+                {
+                    "ticker": t,
+                    "weight_pct": round(weights.get(t, 0.0) * 100.0, 2),
+                    "return_1y_pct": round(returns_1y.get(t, 0.0) * 100.0, 2),
+                }
+                for t in closes.columns
+            ],
+        }
+
+    return {"positions": positions_out, "totals": totals, "history": history, "metrics": metrics}

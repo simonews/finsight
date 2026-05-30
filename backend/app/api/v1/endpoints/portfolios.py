@@ -1,6 +1,11 @@
 from collections.abc import Sequence
 from typing import Annotated
 
+from sqlalchemy import delete
+
+from app.models.ai_report import AIReport
+from app.models.position import Position
+
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,6 +52,9 @@ async def read_portfolio(
 @router.delete("/{portfolio_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_portfolio(
     portfolio: Annotated[Portfolio, Depends(get_owned_portfolio)],
-    db: Annotated[AsyncSession, Depends(get_session)],
+    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    await crud_portfolio.remove(db, id=portfolio.id)
+    await session.execute(delete(AIReport).where(AIReport.portfolio_id == portfolio.id))
+    await session.execute(delete(Position).where(Position.portfolio_id == portfolio.id))
+    await session.delete(portfolio)
+    await session.commit()
