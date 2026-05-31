@@ -216,16 +216,17 @@ def build_portfolio_analytics(positions: list[dict], period: str = "1y") -> dict
 
         portfolio_return = sum(weights.get(t, 0.0) * returns_1y.get(t, 0.0) for t in weights)
 
-        log_returns = np.log(closes / closes.shift(1))
-        weighted = None
-        for t in weights:
-            contrib = log_returns[t] * weights[t]
-            weighted = contrib if weighted is None else weighted + contrib
         annualized_vol = 0.0
-        if weighted is not None:
-            clean = weighted.dropna()
-            if len(clean) > 1:
-                annualized_vol = float(clean.std() * (252 ** 0.5))
+        weighted_tickers = [t for t in closes.columns if t in weights]
+        if weighted_tickers:
+            log_returns = np.log(
+                closes[weighted_tickers] / closes[weighted_tickers].shift(1)
+            ).dropna()
+            if len(log_returns) > 1:
+                cov_daily = log_returns.cov()
+                w_vec = np.array([weights[t] for t in weighted_tickers])
+                portfolio_variance = float(w_vec @ cov_daily.values @ w_vec)
+                annualized_vol = float(np.sqrt(max(portfolio_variance, 0.0) * 252))
 
         metrics = {
             "annualized_volatility": round(annualized_vol, 4),

@@ -2,6 +2,7 @@ import os
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import json
 
 import pandas as pd
 import plotly.express as px
@@ -11,6 +12,69 @@ import streamlit as st
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000/api/v1")
 REQUEST_TIMEOUT = 15
 LOCAL_TZ = ZoneInfo("Europe/Rome")
+
+def _parse_import_date(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return datetime.combine(datetime.today().date(), datetime.min.time()).isoformat()
+    try:
+        return datetime.combine(pd.to_datetime(value).date(), datetime.min.time()).isoformat()
+    except Exception:
+        return datetime.combine(datetime.today().date(), datetime.min.time()).isoformat()
+
+
+def import_positions_control(portfolio_id):
+    st.markdown("**Importa da file (CSV o JSON)**")
+    st.caption("Colonne richieste: ticker, quantity, average_price. Opzionali: purchase_date, sector, market.")
+    uploaded = st.file_uploader("File posizioni", type=["csv", "json"], key="import_file")
+    if uploaded is None:
+        return
+    try:
+        if uploaded.name.lower().endswith(".json"):
+            raw = json.load(uploaded)
+            rows = raw if isinstance(raw, list) else raw.get("positions", [])
+            df = pd.DataFrame(rows)
+        else:
+            df = pd.read_csv(uploaded)
+    except Exception as exc:
+        st.error(f"File non leggibile: {exc}")
+        return
+
+    df.columns = [str(c).lower().strip() for c in df.columns]
+    required = {"ticker", "quantity", "average_price"}
+    if not required.issubset(set(df.columns)):
+        st.error("Mancano colonne obbligatorie: ticker, quantity, average_price.")
+        return
+
+    st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+    if st.button("Importa posizioni", use_container_width=True):
+        imported, failed = 0, 0
+        for _, row in df.iterrows():
+            try:
+                payload = {
+                    "ticker": str(row["ticker"]).upper().strip(),
+                    "quantity": float(row["quantity"]),
+                    "average_price": float(row["average_price"]),
+                    "purchase_date": _parse_import_date(
+                        row["purchase_date"] if "purchase_date" in df.columns else None
+                    ),
+                    "sector": str(row["sector"]) if "sector" in df.columns and pd.notna(row["sector"]) else None,
+                    "market": str(row["market"]) if "market" in df.columns and pd.notna(row["market"]) else None,
+                    "portfolio_id": portfolio_id,
+                }
+                if not payload["ticker"] or payload["quantity"] <= 0 or payload["average_price"] <= 0:
+                    raise ValueError
+            except (ValueError, TypeError, KeyError):
+                failed += 1
+                continue
+            response = authed_call("POST", "/positions/", json=payload)
+            if response is not None and response.status_code == 201:
+                imported += 1
+            else:
+                failed += 1
+        st.toast(f"Importate {imported} posizioni", icon="📥")
+        if failed:
+            st.warning(f"{failed} righe non importate (dati mancanti o non validi).")
+        st.rerun()
 
 def _format_timestamp(iso_string):
     try:
@@ -442,6 +506,8 @@ def render_portfolio_detail(portfolio):
     bar = st.columns(4)
     with bar[0].popover("➕ Aggiungi", use_container_width=True):
         add_position_form(portfolio["id"])
+        st.divider()
+        import_positions_control(portfolio["id"])
     with bar[1].popover("✏️ Modifica", use_container_width=True, disabled=not positions):
         if positions:
             update_position_form(portfolio["id"], positions)
