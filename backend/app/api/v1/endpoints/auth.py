@@ -1,10 +1,8 @@
 from datetime import timedelta
 from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.config import settings
 from app.core.security import create_access_token, verify_password
 from app.crud import user as crud_user
@@ -34,7 +32,7 @@ async def login(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, str]:
     current_user = await crud_user.get_by_email(db, email=form_data.username)
-    if current_user is None or not verify_password(
+    if current_user is None or not await verify_password(
         form_data.password, current_user.hashed_password
     ):
         raise HTTPException(
