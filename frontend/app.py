@@ -8,10 +8,27 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+import plotly.graph_objects as go
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://api:8000/api/v1")
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 30
 LOCAL_TZ = ZoneInfo("Europe/Rome")
+
+def _color_pnl(val):
+    if val is None or pd.isna(val):
+        return ""
+    if val > 0:
+        return "color: #16a34a"   # verde
+    if val < 0:
+        return "color: #dc2626"   # rosso
+    return ""
+
+
+def _fmt_qty(val):
+    if val is None or pd.isna(val):
+        return "—"
+    val = float(val)
+    return f"{val:,.0f}" if val.is_integer() else f"{val:,.2f}"
 
 def _parse_import_date(value):
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -20,6 +37,63 @@ def _parse_import_date(value):
         return datetime.combine(pd.to_datetime(value).date(), datetime.min.time()).isoformat()
     except Exception:
         return datetime.combine(datetime.today().date(), datetime.min.time()).isoformat()
+    
+def summarize_news(ticker):
+    with st.spinner(f"Riassumo le notizie su {ticker}..."):
+        response = authed_call("POST", f"/ai/news/{ticker}")
+        if response is None:
+            return
+        if response.status_code == 429:
+            st.warning("Limite superato (max 3/min) sulle analisi AI. Riprova tra un minuto.")
+            return
+        if response.status_code != 202:
+            st.error(f"Errore ({response.status_code}).")
+            return
+        result = poll_task(response.json()["task_id"])
+    if result and result.get("status") == "SUCCESS":
+        st.session_state[f"ai_news_{ticker}"] = result["result"]["summary"]
+    elif result and result.get("status") == "FAILURE":
+        st.error(f"Riassunto fallito: {result.get('result')}")
+    else:
+        st.warning("Il riassunto sta impiegando piu' del previsto; riprova tra poco.")
+
+def fetch_holdings(ticker):
+    with st.spinner(f"Recupero la composizione di {ticker}..."):
+        response = authed_call("POST", f"/market/holdings/{ticker}")
+        if response is None:
+            return
+        if response.status_code == 429:
+            st.warning("Limite di richieste superato. Riprova tra un minuto.")
+            return
+        if response.status_code != 202:
+            st.error(f"Errore ({response.status_code}).")
+            return
+        result = poll_task(response.json()["task_id"])
+    if result and result.get("status") == "SUCCESS":
+        st.session_state[f"ai_holdings_{ticker}"] = result["result"]
+    elif result and result.get("status") == "FAILURE":
+        st.error(f"Recupero fallito: {result.get('result')}")
+    else:
+        st.warning("Il recupero sta impiegando piu' del previsto; riprova tra poco.")
+
+def fetch_analyst_data(ticker):
+    with st.spinner(f"Recupero i target analisti di {ticker}..."):
+        response = authed_call("POST", f"/market/analyst/{ticker}")
+        if response is None:
+            return
+        if response.status_code == 429:
+            st.warning("Limite di richieste superato. Riprova tra un minuto.")
+            return
+        if response.status_code != 202:
+            st.error(f"Errore ({response.status_code}).")
+            return
+        result = poll_task(response.json()["task_id"])
+    if result and result.get("status") == "SUCCESS":
+        st.session_state[f"ai_analyst_{ticker}"] = result["result"]
+    elif result and result.get("status") == "FAILURE":
+        st.error(f"Recupero fallito: {result.get('result')}")
+    else:
+        st.warning("Il recupero sta impiegando piu' del previsto; riprova tra poco.")
 
 
 def import_positions_control(portfolio_id):
@@ -255,8 +329,14 @@ def render_positions_table(positions):
     df["quantity"] = df["quantity"].astype(float)
     df["average_price"] = df["average_price"].astype(float)
     df["cost_basis"] = df["quantity"] * df["average_price"]
+    df = df[["ticker", "quantity", "average_price", "cost_basis", "sector", "market"]]
+
+    styled = df.style.format(
+        {"quantity": _fmt_qty, "average_price": "{:,.2f}", "cost_basis": "{:,.2f}"},
+        na_rep="—",
+    )
     st.dataframe(
-        df[["ticker", "quantity", "average_price", "cost_basis", "sector", "market"]],
+        styled,
         use_container_width=True, hide_index=True,
         column_config={
             "ticker": st.column_config.Column("Ticker", help="Simbolo di borsa del titolo."),
@@ -273,8 +353,39 @@ def render_pnl_table(analytics):
     if not analytics or not analytics["positions"]:
         return
     pnl_df = pd.DataFrame(analytics["positions"])
+    cols = [
+        "ticker", "current_price", "current_value", "cost_basis", "pnl", "pnl_pct",
+        "fifty_two_week_high", "fifty_two_week_low", "avg_volume",
+    ]
+    pnl_df = pnl_df.reindex(columns=cols)
+
+    def _color_pnl(val):
+        if val is None or pd.isna(val):
+            return ""
+        if val > 0:
+            return "color: #16a34a"   # verde
+        if val < 0:
+            return "color: #dc2626"   # rosso
+        return ""
+
+    number_formats = {
+        "current_price": "{:,.2f}",
+        "current_value": "{:,.2f}",
+        "cost_basis": "{:,.2f}",
+        "pnl": "{:,.2f}",
+        "pnl_pct": "{:.2f}%",
+        "fifty_two_week_high": "{:,.2f}",
+        "fifty_two_week_low": "{:,.2f}",
+        "avg_volume": "{:,.0f}",
+    }
+    styled = (
+        pnl_df.style
+        .format(number_formats, na_rep="—")
+        .map(_color_pnl, subset=["pnl", "pnl_pct"])
+    )
+
     st.dataframe(
-        pnl_df[["ticker", "current_price", "current_value", "cost_basis", "pnl", "pnl_pct"]],
+        styled,
         use_container_width=True, hide_index=True,
         column_config={
             "ticker": st.column_config.Column("Ticker", help="Simbolo di borsa del titolo."),
@@ -283,6 +394,9 @@ def render_pnl_table(analytics):
             "cost_basis": st.column_config.Column("Costo", help="Capitale investito: quantita' x prezzo medio di carico."),
             "pnl": st.column_config.Column("P/L", help="Guadagno o perdita: valore attuale meno costo."),
             "pnl_pct": st.column_config.Column("P/L %", help="Variazione percentuale rispetto al costo investito."),
+            "fifty_two_week_high": st.column_config.Column("Max 1Y", help="Prezzo massimo negli ultimi 12 mesi (massimo a 52 settimane)."),
+            "fifty_two_week_low": st.column_config.Column("Min 1Y", help="Prezzo minimo negli ultimi 12 mesi (minimo a 52 settimane)."),
+            "avg_volume": st.column_config.Column("Volume medio", help="Numero medio di azioni scambiate al giorno (media sull'ultimo trimestre circa)."),
         },
     )
 
@@ -300,11 +414,23 @@ def render_charts(positions, analytics):
         st.plotly_chart(fig_pie, use_container_width=True)
     with right:
         if analytics and analytics["history"]["dates"]:
+            window = st.radio(
+                "Finestra grafico", ["1M", "3M", "6M", "1Y"], index=3,
+                horizontal=True, key="chart_window", label_visibility="collapsed",
+            )
+            n_map = {"1M": 21, "3M": 63, "6M": 126, "1Y": None}
             hist = analytics["history"]
             hist_df = pd.DataFrame(hist["series"], index=pd.to_datetime(hist["dates"]))
-            fig_line = px.line(hist_df, title="Andamento prezzi (ultimi 12 mesi)")
-            fig_line.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0), legend_title_text="")
-            st.plotly_chart(fig_line, use_container_width=True)
+            hist_df = hist_df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+            n = n_map[window]
+            if n is not None:
+                hist_df = hist_df.tail(n)
+            if not hist_df.empty and hist_df.shape[1] > 0:
+                fig_line = px.line(hist_df, title=f"Andamento prezzi ({window})")
+                fig_line.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0), legend_title_text="")
+                st.plotly_chart(fig_line, use_container_width=True)
+            else:
+                st.info("Andamento prezzi non disponibile al momento.")
         else:
             st.info("Andamento prezzi non disponibile al momento.")
 
@@ -316,13 +442,33 @@ def render_charts(positions, analytics):
                   help="Oscillazione annualizzata dei rendimenti pesati: piu' alta = piu' rischio.")
         m2.metric("Rendimento 1Y (portafoglio)", f"{metrics['portfolio_return_1y'] * 100:.2f}%",
                   help="Rendimento a 12 mesi, media dei rendimenti pesata per i pesi di mercato.")
-        tech_df = pd.DataFrame(metrics["per_ticker"])
+        tech_df = pd.DataFrame(metrics["per_ticker"]).reindex(columns=[
+            "ticker", "weight_pct",
+            "return_1m_pct", "return_3m_pct", "return_6m_pct", "return_1y_pct",
+            "pe_ratio", "dividend_yield",
+        ])
+        ret_cols = ["return_1m_pct", "return_3m_pct", "return_6m_pct", "return_1y_pct"]
+        tech_styled = (
+            tech_df.style
+            .format({
+                "weight_pct": "{:.2f}%",
+                "return_1m_pct": "{:.2f}%", "return_3m_pct": "{:.2f}%",
+                "return_6m_pct": "{:.2f}%", "return_1y_pct": "{:.2f}%",
+                "pe_ratio": "{:.2f}", "dividend_yield": "{:.2f}%",
+            }, na_rep="—")
+            .map(_color_pnl, subset=ret_cols)
+        )
         st.dataframe(
-            tech_df, use_container_width=True, hide_index=True,
+            tech_styled, use_container_width=True, hide_index=True,
             column_config={
                 "ticker": st.column_config.Column("Ticker", help="Simbolo di borsa del titolo."),
-                "weight_pct": st.column_config.Column("Peso (mercato) %", help="Quota del titolo sul valore di mercato totale del portafoglio."),
-                "return_1y_pct": st.column_config.Column("Rendimento 1Y %", help="Variazione percentuale del prezzo del titolo negli ultimi 12 mesi."),
+                "weight_pct": st.column_config.Column("Peso", help="Quota del titolo sul valore di mercato totale del portafoglio."),
+                "return_1m_pct": st.column_config.Column("Rend. 1M", help="Rendimento sull'ultimo mese (circa 21 sedute di borsa)."),
+                "return_3m_pct": st.column_config.Column("Rend. 3M", help="Rendimento sull'ultimo trimestre (circa 63 sedute)."),
+                "return_6m_pct": st.column_config.Column("Rend. 6M", help="Rendimento sugli ultimi 6 mesi (circa 126 sedute)."),
+                "return_1y_pct": st.column_config.Column("Rend. 1Y", help="Rendimento sugli ultimi 12 mesi."),
+                "pe_ratio": st.column_config.Column("P/E", help="Prezzo/utili (trailing). Vuoto se non disponibile o utili negativi."),
+                "dividend_yield": st.column_config.Column("Div. Yield", help="Dividendo annuo / prezzo attuale (rapporto a oggi). Lo storico dei pagamenti è nella sezione Dividendi del titolo. Vuoto se il titolo non paga dividendi."),
             },
         )
 
@@ -413,6 +559,8 @@ def remove_position_control(positions):
             st.error(f"Errore ({response.status_code}).")
 
 
+
+
 def close_portfolio_control(portfolio):
     st.caption(
         f"Eliminerai definitivamente '{portfolio['name']}' con tutte le sue posizioni e report. Irreversibile."
@@ -449,7 +597,7 @@ def fetch_market_data(tickers):
         st.toast("Dati aggiornati con successo", icon="✅")
         return
     if rate_limited:
-        st.warning(f"Limite superato (max 5/min) per: {', '.join(rate_limited)}. Riprova tra un minuto.")
+        st.warning(f"Limite di richieste superato per: {', '.join(rate_limited)}. Riprova tra un minuto.")
     if failed:
         st.warning("Aggiornamento non riuscito per alcune posizioni.")
     if accepted:
@@ -523,8 +671,8 @@ def render_portfolio_detail(portfolio):
     if a2.button("🤖 Genera Report AI", use_container_width=True):
         generate_report(portfolio["id"])
 
-    tab_charts, tab_pos, tab_reports = st.tabs(
-        ["Grafici & metriche", "Posizioni & P/L", "Report AI"]
+    tab_charts, tab_pos, tab_ticker, tab_reports = st.tabs(
+        ["Grafici & metriche", "Posizioni & P/L", "Analisi titolo", "Report portfolio"]
     )
     with tab_charts:
         if positions:
@@ -535,6 +683,8 @@ def render_portfolio_detail(portfolio):
         render_positions_table(positions)
         if analytics:
             render_pnl_table(analytics)
+    with tab_ticker:
+        render_ticker_ai(positions)
     with tab_reports:
         render_reports(portfolio["id"])
 
@@ -560,6 +710,202 @@ def render_dashboard():
     st.divider()
     render_portfolio_detail(options[choice])
 
+def explain_ticker(ticker):
+    with st.spinner(f"Analizzo l'andamento di {ticker}..."):
+        response = authed_call("POST", f"/ai/explain/{ticker}")
+        if response is None:
+            return
+        if response.status_code == 429:
+            st.warning("Limite superato (max 3/min) sulle analisi AI. Riprova tra un minuto.")
+            return
+        if response.status_code != 202:
+            st.error(f"Errore ({response.status_code}).")
+            return
+        result = poll_task(response.json()["task_id"])
+    if result and result.get("status") == "SUCCESS":
+        st.session_state[f"ai_explain_{ticker}"] = result["result"]["analysis"]
+    elif result and result.get("status") == "FAILURE":
+        st.error(f"Analisi fallita: {result.get('result')}")
+    else:
+        st.warning("L'analisi sta impiegando piu' del previsto; riprova tra poco.")
+
+def suggest_peers(ticker):
+    with st.spinner(f"Cerco titoli simili a {ticker}..."):
+        response = authed_call("POST", f"/ai/peers/{ticker}")
+        if response is None:
+            return
+        if response.status_code == 429:
+            st.warning("Limite superato (max 3/min) sulle analisi AI. Riprova tra un minuto.")
+            return
+        if response.status_code != 202:
+            st.error(f"Errore ({response.status_code}).")
+            return
+        result = poll_task(response.json()["task_id"])
+    if result and result.get("status") == "SUCCESS":
+        st.session_state[f"ai_peers_{ticker}"] = result["result"]
+    elif result and result.get("status") == "FAILURE":
+        st.error(f"Ricerca fallita: {result.get('result')}")
+    else:
+        st.warning("La ricerca sta impiegando piu' del previsto; riprova tra poco.")
+
+
+def render_ticker_ai(positions):
+    if not positions:
+        st.info("Aggiungi una posizione per analizzare un titolo.")
+        return
+    tickers = sorted({p["ticker"] for p in positions})
+    ticker = st.selectbox("Titolo da analizzare", tickers, key="ai_ticker_select")
+    c1, c2, c3, c4 = st.columns(4)
+    d1, d2, d3, d4 = st.columns(4)
+    if d1.button("💰 Dividendi", use_container_width=True, key="div_btn"):
+        fetch_dividends_data(ticker)
+    if d2.button("🎯 Target analisti", use_container_width=True, key="analyst_btn"):
+        fetch_analyst_data(ticker)
+    if c1.button("🔍 Spiega andamento", use_container_width=True, key="explain_btn"):
+        explain_ticker(ticker)
+    if c2.button("📰 Riassunto notizie", use_container_width=True, key="news_btn"):
+        summarize_news(ticker)
+    if c3.button("🏷️ Titoli simili", use_container_width=True, key="peers_btn"):
+        suggest_peers(ticker)
+    if c4.button("🧩 Composizione ETF", use_container_width=True, key="holdings_btn"):
+        fetch_holdings(ticker)
+
+    explanation = st.session_state.get(f"ai_explain_{ticker}")
+    if explanation:
+        st.markdown("**Andamento**")
+        with st.container(border=True):
+            st.markdown(explanation)
+
+    news = st.session_state.get(f"ai_news_{ticker}")
+    if news:
+        st.markdown("**Notizie recenti**")
+        with st.container(border=True):
+            st.markdown(news)
+
+    peers = st.session_state.get(f"ai_peers_{ticker}")
+    if peers:
+        st.markdown(f"**Titoli simili per settore** ({peers.get('sector') or 'n/d'})")
+        if peers.get("message"):
+            st.info(peers["message"])
+        elif peers.get("peers"):
+            peers_df = pd.DataFrame(peers["peers"]).reindex(
+                columns=["ticker", "name", "sector", "current_price", "reason"]
+            )
+            st.dataframe(
+                peers_df, use_container_width=True, hide_index=True,
+                column_config={
+                    "ticker": st.column_config.Column("Ticker"),
+                    "name": st.column_config.Column("Nome"),
+                    "sector": st.column_config.Column("Settore"),
+                    "current_price": st.column_config.NumberColumn("Prezzo attuale"),
+                    "reason": st.column_config.Column("Perché simile", help="Motivazione generata dall'AI, indicativa."),
+                },
+            )
+            st.caption("Elenco puramente informativo, non è consulenza finanziaria. "
+                       "I ticker proposti dall'AI sono stati verificati su dati di mercato reali.")
+        else:
+            st.info("Nessun titolo simile valido trovato.")
+
+    holdings = st.session_state.get(f"ai_holdings_{ticker}")
+    if holdings:
+        title = f"**Composizione — top holding** {holdings.get('name') or ''}".strip()
+        st.markdown(title)
+        if holdings.get("message"):
+            st.info(holdings["message"])
+        elif holdings.get("holdings"):
+            hold_df = pd.DataFrame(holdings["holdings"]).reindex(columns=["ticker", "name", "weight_pct"])
+            hold_styled = hold_df.style.format({"weight_pct": "{:.2f}%"}, na_rep="—")
+            st.dataframe(
+                hold_styled, use_container_width=True, hide_index=True,
+                column_config={
+                    "ticker": st.column_config.Column("Ticker", help="Simbolo del titolo dentro il fondo."),
+                    "name": st.column_config.Column("Nome"),
+                    "weight_pct": st.column_config.Column("Peso", help="Peso sul fondo (solo i principali titoli, non l'intero paniere)."),
+                },
+            )
+            st.caption("Solo i principali titoli esposti dal provider, non l'intero paniere dell'ETF.")
+        else:
+            st.info("Composizione non disponibile.")
+    div = st.session_state.get(f"ai_div_{ticker}")
+    if div:
+        st.subheader(
+            "Dividendi pagati per azione",
+            help="Importi effettivamente distribuiti per azione nel tempo. Diverso dal *dividend yield* "
+                 "in tabella, che è il rapporto dividendo annuo / prezzo attuale (una percentuale a oggi).",
+        )
+        if div.get("message"):
+            st.info(div["message"])
+        elif div.get("dividends"):
+            div_df = pd.DataFrame(div["dividends"])
+            div_df["date"] = pd.to_datetime(div_df["date"])
+            fig_div = px.bar(div_df, x="date", y="amount", title=f"Dividendi {ticker} (per azione)")
+            fig_div.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0),
+                                  xaxis_title="", yaxis_title="importo per azione")
+            st.plotly_chart(fig_div, use_container_width=True)
+        else:
+            st.info("Nessuno storico dividendi disponibile.")
+
+    analyst = st.session_state.get(f"ai_analyst_{ticker}")
+    if analyst:
+        st.subheader(
+            "Target di prezzo degli analisti",
+            help="Prezzi obiettivo a 12 mesi stimati dagli analisti (minimo, medio, massimo) e consenso di "
+                 "raccomandazione. L'upside è la distanza % tra target medio e prezzo attuale. Sono opinioni di "
+                 "terzi, non una previsione garantita né una raccomandazione.",
+        )
+        if analyst.get("message"):
+            st.info(analyst["message"])
+        elif analyst.get("analyst"):
+            a = analyst["analyst"]
+            cols = st.columns(4)
+            cols[0].metric("Prezzo attuale", f"{a['current_price']:,.2f}" if a["current_price"] is not None else "—")
+            cols[1].metric(
+                "Target medio", f"{a['target_mean']:,.2f}" if a["target_mean"] is not None else "—",
+                delta=f"{a['upside_pct']:+.2f}%" if a["upside_pct"] is not None else None,
+                help="Distanza tra target medio e prezzo attuale.",
+            )
+            cols[2].metric("Consenso", (a["recommendation"] or "—").replace("_", " ").title())
+            cols[3].metric("N. analisti", a["num_analysts"] if a["num_analysts"] is not None else "—")
+
+            if a["target_low"] is not None and a["target_high"] is not None and a["current_price"] is not None:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=[a["target_low"], a["target_high"]], y=[0, 0], mode="lines",
+                    line=dict(width=8, color="#64748b"), showlegend=False, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(
+                    x=[a["target_low"], a["target_mean"], a["target_high"]], y=[0, 0, 0],
+                    mode="markers+text", text=["Low", "Medio", "High"], textposition="top center",
+                    marker=dict(size=11, color="#64748b"), showlegend=False,
+                    hovertemplate="%{x:.2f}<extra></extra>"))
+                fig.add_trace(go.Scatter(
+                    x=[a["current_price"]], y=[0], mode="markers+text", text=["Prezzo attuale"],
+                    textposition="bottom center", marker=dict(size=15, symbol="diamond", color="#16a34a"),
+                    showlegend=False, hovertemplate="Prezzo attuale: %{x:.2f}<extra></extra>"))
+                fig.update_layout(height=180, margin=dict(t=20, b=20, l=0, r=0),
+                                  xaxis_title="prezzo", yaxis=dict(visible=False, range=[-1, 1]))
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Dati analisti non disponibili.")
+
+def fetch_dividends_data(ticker):
+    with st.spinner(f"Recupero i dividendi di {ticker}..."):
+        response = authed_call("POST", f"/market/dividends/{ticker}")
+        if response is None:
+            return
+        if response.status_code == 429:
+            st.warning("Limite di richieste superato. Riprova tra un minuto.")
+            return
+        if response.status_code != 202:
+            st.error(f"Errore ({response.status_code}).")
+            return
+        result = poll_task(response.json()["task_id"])
+    if result and result.get("status") == "SUCCESS":
+        st.session_state[f"ai_div_{ticker}"] = result["result"]
+    elif result and result.get("status") == "FAILURE":
+        st.error(f"Recupero fallito: {result.get('result')}")
+    else:
+        st.warning("Il recupero sta impiegando piu' del previsto; riprova tra poco.")
+
 
 def main():
     st.set_page_config(page_title="FinSight", page_icon="📈", layout="wide")
@@ -572,6 +918,8 @@ def main():
     else:
         render_sidebar()
         render_dashboard()
+
+    
 
 
 main()

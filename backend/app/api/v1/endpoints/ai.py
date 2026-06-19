@@ -5,13 +5,14 @@ from fastapi import APIRouter, Depends, status
 from fastapi_limiter.depends import RateLimiter
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_owned_portfolio
+from app.api.deps import get_owned_portfolio, get_current_user
 from app.crud import ai_report as crud_ai_report
 from app.db.session import get_session
 from app.models.ai_report import AIReport
 from app.models.portfolio import Portfolio
 from app.schemas.schema_ai_report import AIReportRead
-from app.tasks.ai_tasks import analyze_portfolio_task
+from app.tasks.ai_tasks import analyze_portfolio_task, explain_ticker_task, summarize_news_task, suggest_peers_task
+from app.models.user import User
 
 router = APIRouter()
 
@@ -27,6 +28,18 @@ async def request_portfolio_report(
     task = analyze_portfolio_task.delay(str(portfolio.id))
     return {"task_id": task.id, "portfolio_id": str(portfolio.id), "status": "accepted"}
 
+@router.post(
+    "/explain/{ticker}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=3, seconds=60))],
+)
+async def request_ticker_explanation(
+    ticker: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, str]:
+    task = explain_ticker_task.delay(ticker.upper())
+    return {"task_id": task.id, "ticker": ticker.upper(), "status": "accepted"}
+
 
 @router.get("/reports/{portfolio_id}", response_model=list[AIReportRead])
 async def read_portfolio_reports(
@@ -34,3 +47,27 @@ async def read_portfolio_reports(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Sequence[AIReport]:
     return await crud_ai_report.get_by_portfolio(db, portfolio_id=portfolio.id)
+
+@router.post(
+    "/news/{ticker}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=3, seconds=60))],
+)
+async def request_news_summary(
+    ticker: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, str]:
+    task = summarize_news_task.delay(ticker.upper())
+    return {"task_id": task.id, "ticker": ticker.upper(), "status": "accepted"}
+
+@router.post(
+    "/peers/{ticker}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=3, seconds=60))],
+)
+async def request_sector_peers(
+    ticker: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, str]:
+    task = suggest_peers_task.delay(ticker.upper())
+    return {"task_id": task.id, "ticker": ticker.upper(), "status": "accepted"}

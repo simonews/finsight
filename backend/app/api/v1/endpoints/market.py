@@ -13,15 +13,27 @@ from app.crud import position as crud_position
 from app.db.session import get_session
 from app.models.portfolio import Portfolio
 from app.models.user import User
-from app.tasks.market import fetch_market_data_task
+from app.tasks.market import fetch_market_data_task, fetch_etf_holdings_task, fetch_dividends_task, fetch_analyst_task
 
 router = APIRouter()
 
 
 @router.post(
+    "/holdings/{ticker}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=30, seconds=60))],
+)
+async def request_etf_holdings(
+    ticker: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, str]:
+    task = fetch_etf_holdings_task.delay(ticker.upper())
+    return {"task_id": task.id, "ticker": ticker.upper(), "status": "accepted"}
+
+@router.post(
     "/fetch/{ticker}",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(RateLimiter(times=5, seconds=60))],
+    dependencies=[Depends(RateLimiter(times=30, seconds=60))],
 )
 async def fetch_market_data(
     ticker: str,
@@ -58,3 +70,27 @@ async def get_portfolio_prices(
         for p in positions
     ]
     return await run_in_threadpool(build_portfolio_analytics, payload)
+
+@router.post(
+    "/dividends/{ticker}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=30, seconds=60))],
+)
+async def request_dividends(
+    ticker: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, str]:
+    task = fetch_dividends_task.delay(ticker.upper())
+    return {"task_id": task.id, "ticker": ticker.upper(), "status": "accepted"}
+
+@router.post(
+    "/analyst/{ticker}",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=30, seconds=60))],
+)
+async def request_analyst_targets(
+    ticker: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, str]:
+    task = fetch_analyst_task.delay(ticker.upper())
+    return {"task_id": task.id, "ticker": ticker.upper(), "status": "accepted"}

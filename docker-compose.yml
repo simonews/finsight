@@ -87,6 +87,33 @@ services:
       cache:
         condition: service_healthy
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: finsight-prometheus
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - finsight-prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - public_net
+      - private_net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: finsight-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - finsight-grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - public_net
+      - private_net
+
 networks:
   public_net:
     name: finsight-public-net
@@ -100,3 +127,7 @@ volumes:
     name: finsight-postgres-data
   redis_data:
     name: finsight-redis-data
+  finsight-prometheus-data:
+    name: finsight-prometheus-data
+  finsight-grafana-data:
+    name: finsight-grafana-data

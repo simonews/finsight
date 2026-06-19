@@ -1,6 +1,7 @@
 import io
 import math
 from typing import Any
+import time
 
 import numpy as np
 import pandas as pd
@@ -9,8 +10,18 @@ from celery.utils.log import get_task_logger
 
 
 from app.core.cache import CACHE_TTL_SECONDS, get_redis_sync
+from app.core.market_provider import fetch_ticker_info
 
 logger = get_task_logger(__name__)
+
+def _window_return_pct(series: "pd.Series", days: int) -> float | None:
+    if len(series) <= days:
+        return None
+    past = float(series.iloc[-1 - days])
+    last = float(series.iloc[-1])
+    if past == 0:
+        return None
+    return round((last / past - 1.0) * 100.0, 2)
 
 
 def _extract_prices(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
@@ -98,9 +109,18 @@ def calculate_portfolio_metrics(positions: list[dict[str, Any]]) -> dict[str, An
         result["missing_tickers"] = missing
     return result
 
-def _download_close_prices(tickers: list[str], period: str) -> pd.DataFrame:
-    raw = yf.download(tickers, period=period, progress=False, auto_adjust=True)
-    if raw.empty:
+def _download_close_prices(tickers: list[str], period: str, retries: int = 2) -> pd.DataFrame:
+    raw = None
+    for attempt in range(retries + 1):
+        try:
+            raw = yf.download(tickers, period=period, progress=False, auto_adjust=True)
+        except Exception:
+            raw = None
+        if raw is not None and not raw.empty:
+            break
+        if attempt < retries:
+            time.sleep(0.8)
+    if raw is None or raw.empty:
         return pd.DataFrame()
     if isinstance(raw.columns, pd.MultiIndex):
         closes = raw["Close"].copy()
@@ -129,6 +149,34 @@ def _get_cached_closes(tickers: list[str], period: str) -> pd.DataFrame:
             pass
     return closes
 
+def _extract_indicators(info: dict) -> dict:
+    empty = {"fifty_two_week_high": None, "fifty_two_week_low": None,
+             "avg_volume": None, "pe_ratio": None, "dividend_yield": None}
+    if not info:
+        return empty
+    avg_vol = (
+        info.get("averageVolume")
+        or info.get("averageDailyVolume3Month")
+        or info.get("averageVolume10days")
+        or info.get("averageDailyVolume10Day")
+    )
+    high = info.get("fiftyTwoWeekHigh")
+    low = info.get("fiftyTwoWeekLow")
+    pe = info.get("trailingPE")
+    raw_div = info.get("trailingAnnualDividendYield")
+    if raw_div is not None:
+        div = float(raw_div) * 100.0
+    else:
+        raw_div = info.get("dividendYield")
+        div = (float(raw_div) if float(raw_div) > 1 else float(raw_div) * 100.0) if raw_div is not None else None
+    return {
+        "fifty_two_week_high": round(float(high), 4) if high is not None else None,
+        "fifty_two_week_low": round(float(low), 4) if low is not None else None,
+        "avg_volume": int(avg_vol) if avg_vol is not None else None,
+        "pe_ratio": round(float(pe), 2) if pe is not None else None,
+        "dividend_yield": round(div, 2) if div is not None else None,
+    }
+
 
 def build_portfolio_analytics(positions: list[dict], period: str = "1y") -> dict:
     empty = {
@@ -144,6 +192,13 @@ def build_portfolio_analytics(positions: list[dict], period: str = "1y") -> dict
     if not closes.empty:
         closes.index = pd.to_datetime(closes.index)
     latest = closes.iloc[-1] if not closes.empty else None
+
+    indicators_by_ticker: dict[str, dict] = {}
+    for t in tickers:
+        try:
+            indicators_by_ticker[t] = _extract_indicators(fetch_ticker_info(t))
+        except Exception:
+            indicators_by_ticker[t] = _extract_indicators({})
 
     positions_out = []
     total_cost = 0.0
@@ -167,6 +222,7 @@ def build_portfolio_analytics(positions: list[dict], period: str = "1y") -> dict
         else:
             value = pnl = pnl_pct = None
 
+        ind = indicators_by_ticker.get(ticker, {})
         positions_out.append({
             "ticker": ticker,
             "quantity": qty,
@@ -176,6 +232,9 @@ def build_portfolio_analytics(positions: list[dict], period: str = "1y") -> dict
             "current_value": round(value, 2) if value is not None else None,
             "pnl": round(pnl, 2) if pnl is not None else None,
             "pnl_pct": round(pnl_pct, 2) if pnl_pct is not None else None,
+            "fifty_two_week_high": ind.get("fifty_two_week_high"),
+            "fifty_two_week_low": ind.get("fifty_two_week_low"),
+            "avg_volume": ind.get("avg_volume"),
         })
 
     totals = {
@@ -235,10 +294,76 @@ def build_portfolio_analytics(positions: list[dict], period: str = "1y") -> dict
                 {
                     "ticker": t,
                     "weight_pct": round(weights.get(t, 0.0) * 100.0, 2),
+                    "return_1m_pct": _window_return_pct(closes[t].dropna(), 21),
+                    "return_3m_pct": _window_return_pct(closes[t].dropna(), 63),
+                    "return_6m_pct": _window_return_pct(closes[t].dropna(), 126),
                     "return_1y_pct": round(returns_1y.get(t, 0.0) * 100.0, 2),
+                    "pe_ratio": indicators_by_ticker.get(t, {}).get("pe_ratio"),
+                    "dividend_yield": indicators_by_ticker.get(t, {}).get("dividend_yield"),
                 }
                 for t in closes.columns
             ],
         }
 
     return {"positions": positions_out, "totals": totals, "history": history, "metrics": metrics}
+
+def compute_ticker_trend(ticker: str, period: str = "1y") -> dict:
+    ticker = ticker.upper()
+    try:
+        closes = _get_cached_closes([ticker], period)
+    except Exception:
+        closes = pd.DataFrame()
+    try:
+        info = fetch_ticker_info(ticker) or {}
+    except Exception:
+        info = {}
+
+    if closes.empty or ticker not in closes.columns:
+        return {"ticker": ticker, "error": "no_price_data"}
+    series = closes[ticker].dropna()
+    if len(series) < 2:
+        return {"ticker": ticker, "error": "insufficient_data"}
+
+    first = float(series.iloc[0])
+    last = float(series.iloc[-1])
+    return_1y_pct = round((last / first - 1.0) * 100.0, 2) if first else None
+
+    log_ret = np.log(series / series.shift(1)).dropna()
+    annualized_vol_pct = (
+        round(float(log_ret.std() * math.sqrt(252)) * 100.0, 2) if len(log_ret) > 1 else None
+    )
+
+    period_high = round(float(series.max()), 4)
+    period_low = round(float(series.min()), 4)
+    running_max = series.cummax()
+    max_drawdown_pct = round(float(((series - running_max) / running_max).min() * 100.0), 2)
+
+    ind = _extract_indicators(info)
+    high_52 = ind["fifty_two_week_high"] if ind["fifty_two_week_high"] is not None else period_high
+    low_52 = ind["fifty_two_week_low"] if ind["fifty_two_week_low"] is not None else period_low
+    pct_from_high = round((last / high_52 - 1.0) * 100.0, 2) if high_52 else None
+    pct_from_low = round((last / low_52 - 1.0) * 100.0, 2) if low_52 else None
+
+    return {
+        "ticker": ticker,
+        "name": info.get("longName") or info.get("shortName") or ticker,
+        "sector": info.get("sector"),
+        "period": period,
+        "current_price": round(last, 4),
+        "price_1y_ago": round(first, 4),
+        "return_1m_pct": _window_return_pct(series, 21),
+        "return_3m_pct": _window_return_pct(series, 63),
+        "return_6m_pct": _window_return_pct(series, 126),
+        "return_1y_pct": return_1y_pct,
+        "annualized_volatility_pct": annualized_vol_pct,
+        "period_high": period_high,
+        "period_low": period_low,
+        "fifty_two_week_high": high_52,
+        "fifty_two_week_low": low_52,
+        "pct_from_52w_high": pct_from_high,
+        "pct_from_52w_low": pct_from_low,
+        "max_drawdown_pct": max_drawdown_pct,
+        "avg_volume": ind["avg_volume"],
+        "pe_ratio": ind["pe_ratio"],
+        "dividend_yield_pct": ind["dividend_yield"],
+    }
