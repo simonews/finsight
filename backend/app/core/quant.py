@@ -94,6 +94,21 @@ def calculate_portfolio_metrics(positions: list[dict[str, Any]]) -> dict[str, An
     weight_series = pd.Series(weights)
     portfolio_daily_log_returns = (daily_log_returns * weight_series).sum(axis=1)
     annualized_volatility = float(portfolio_daily_log_returns.std() * math.sqrt(252))
+    daily_log_returns = np.log(prices / prices.shift(1)).dropna()
+    weight_series = pd.Series(weights)
+    portfolio_daily_log_returns = (daily_log_returns * weight_series).sum(axis=1)
+    annualized_volatility = float(portfolio_daily_log_returns.std() * math.sqrt(252))
+
+    # Calcolo del Max Drawdown del portafoglio aggregato
+    cum_returns = np.exp(portfolio_daily_log_returns.cumsum())
+    running_max = cum_returns.cummax()
+    drawdowns = (cum_returns - running_max) / running_max
+    portfolio_max_drawdown = float(drawdowns.min() * 100.0) if len(drawdowns) > 0 else 0.0
+
+    # Calcolo dello Sharpe Ratio (assumendo un risk-free rate del 4% per il 2024-2026)
+    risk_free_rate = 0.04
+    sharpe_ratio = float((portfolio_return - risk_free_rate) / annualized_volatility) if annualized_volatility > 0 else 0.0
+    
 
     result: dict[str, Any] = {
         "period": "1y",
@@ -102,6 +117,8 @@ def calculate_portfolio_metrics(positions: list[dict[str, Any]]) -> dict[str, An
         "asset_returns_1y": {t: round(asset_returns[t], 4) for t in available},
         "portfolio_return_1y": round(portfolio_return, 4),
         "annualized_volatility": round(annualized_volatility, 4),
+        "max_drawdown_pct": round(portfolio_max_drawdown, 2), 
+        "sharpe_ratio": round(sharpe_ratio, 2),               
         "total_market_value": round(total_value, 2),
     }
     missing = [t for t in tickers if t not in available]

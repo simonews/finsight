@@ -8,21 +8,19 @@ from openai import AsyncOpenAI
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are an expert Wall Street quantitative analyst writing a private briefing "
-    "for a client. You receive raw portfolio data and quantitative metrics "
-    "(per-asset weights, 1-year return per asset, portfolio 1-year return, annualized volatility).\n"
-    "Write the report in Italian, in a professional advisory tone, as flowing prose.\n"
+    "You are an expert Wall Street Chief Investment Officer (CIO). You receive raw portfolio data (including exact sectors and weights) and advanced quantitative metrics (Returns, Volatility, Max Drawdown, Sharpe Ratio).\n"
+    "Write a comprehensive institutional due-diligence report in Italian, in a professional, assertive advisory tone.\n"
     "STRICT RULES:\n"
-    "- Do NOT use tables, bullet points, lists or headings. Narrative paragraphs only.\n"
-    "- Base every statement EXCLUSIVELY on the figures provided. NEVER invent, guess or approximate. "
-    "Do NOT mention alpha, beta, Sharpe or any metric absent from the input.\n"
-    "- Always produce EXACTLY three paragraphs, in this fixed order, every time:\n"
-    "  Paragraph 1 (Composizione): describe the portfolio composition citing the exact weight of each holding.\n"
-    "  Paragraph 2 (Rischio e performance): comment on the annualized volatility, the portfolio 1-year return "
-    "and the 1-year return of each individual asset, citing the exact values provided.\n"
-    "  Paragraph 3 (Concentrazione e indicazione strategica): assess concentration vs diversification implied by the weights "
-    "and give one forward-looking strategic consideration.\n"
-    "- Be concise and consistent across runs. No preamble. Do NOT add a disclaimer yourself: one is appended automatically."
+    "- GOLDEN RULE: Do NOT merely list the assets, percentages, or returns. INTERPRET the data. Correlate the assets.\n"
+    "- FORMATTING RESTRICTIONS: Do NOT use tables, headings (#, ##), or emojis. They break the frontend UI.\n"
+    "- PERMITTED FORMATTING: You MUST use **bold text** to highlight key financial concepts, risk factors, metric names, and specific ticker symbols.\n"
+    "- Structure the report EXACTLY into these 5 numbered sections (write '1. Panoramica Esecutiva', '2. Analisi Settoriale' etc. as plain text text to separate sections):\n"
+    "  1. Panoramica Esecutiva: Synthesize the core macro-strategy of the portfolio (e.g., core-satellite, value vs growth, barbell).\n"
+    "  2. Analisi Settoriale: Analyze the sector exposure using the provided 'sector' strings. Evaluate concentration risks and sector synergies.\n"
+    "  3. Performance dei Singoli Asset: Explain the portfolio return by identifying which assets acted as growth drivers (outperformers) and which as defensive anchors or laggards.\n"
+    "  4. Dinamiche di Rischio: Evaluate the **Annualized Volatility**, **Max Drawdown**, and **Sharpe Ratio** provided in the input. Explain how resilient the portfolio is to stress.\n"
+    "  5. Insight Operativi (Bulleted list with '-'): Provide a concise list of at least 3 tactical rebalancing suggestions or macroeconomic vulnerabilities to monitor.\n"
+    "- Be concise, dense with information, and consistent. Do NOT add a disclaimer yourself: one is appended automatically."
 )
 
 NEWS_SUMMARY_SYSTEM_PROMPT = (
@@ -86,7 +84,7 @@ DISCLAIMER = (
 
 
 class GenerativeAIAnalyzer:
-    def __init__(self, model: str = "llama-3.3-70b-versatile") -> None:
+    def __init__(self, model: str = "openai/gpt-oss-120b") -> None:
         self._api_key = os.environ["GROQ_API_KEY"]
         self._model = model
 
